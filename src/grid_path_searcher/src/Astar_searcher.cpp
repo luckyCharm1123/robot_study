@@ -30,6 +30,7 @@ void AstarPathFinder::initGridMap(double _resolution, Vector3d global_xyz_l, Vec
 
     // 分配占用栅格数据数组
     data = new uint8_t[GLXYZ_SIZE];
+    // 初始化栅格数据为未占用状态
     memset(data, 0, GLXYZ_SIZE * sizeof(uint8_t));
     
     // 创建三维网格节点数组
@@ -69,7 +70,7 @@ void AstarPathFinder::resetUsedGrids()
 // 设置障碍物
 void AstarPathFinder::setObs(const double coord_x, const double coord_y, const double coord_z)
 {
-    // 检查坐标是否在地图范围内
+    // 检查坐标是否在地图范围内，否则直接返回
     if( coord_x < gl_xl  || coord_y < gl_yl  || coord_z <  gl_zl || 
         coord_x >= gl_xu || coord_y >= gl_yu || coord_z >= gl_zu )
         return;
@@ -79,7 +80,7 @@ void AstarPathFinder::setObs(const double coord_x, const double coord_y, const d
     int idx_y = static_cast<int>( (coord_y - gl_yl) * inv_resolution);
     int idx_z = static_cast<int>( (coord_z - gl_zl) * inv_resolution);      
 
-    // 标记该栅格为障碍物（占用）
+    // 标记该栅格为障碍物（占用）三维转一维占用
     data[idx_x * GLYZ_SIZE + idx_y * GLZ_SIZE + idx_z] = 1;
 }
 
@@ -98,6 +99,7 @@ vector<Vector3d> AstarPathFinder::getVisitedNodes()
     RCLCPP_WARN(rclcpp::get_logger("astar_searcher"), "visited_nodes size : %zu", visited_nodes.size());
     return visited_nodes;
 }
+
 
 // 将栅格索引转换为世界坐标（栅格中心点）
 Vector3d AstarPathFinder::gridIndex2coord(const Vector3i & index) 
@@ -120,7 +122,6 @@ Vector3i AstarPathFinder::coord2gridIndex(const Vector3d & pt)
     idx <<  min( max( int( (pt(0) - gl_xl) * inv_resolution), 0), GLX_SIZE - 1),
             min( max( int( (pt(1) - gl_yl) * inv_resolution), 0), GLY_SIZE - 1),
             min( max( int( (pt(2) - gl_zl) * inv_resolution), 0), GLZ_SIZE - 1);                  
-  
     return idx;
 }
 
@@ -162,6 +163,29 @@ inline void AstarPathFinder::AstarGetSucc(GridNodePtr currentPtr, vector<GridNod
 {   
     neighborPtrSets.clear();
     edgeCostSets.clear();
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dz = -1; dz <= 1; dz++)
+            {
+                // 获取邻居索引
+                int i = currentPtr->index(0) + dx;
+                int j = currentPtr->index(1) + dy;
+                int k = currentPtr->index(2) + dz;
+                // 跳过在开集或闭集中的节点
+                // if(GridNodeMap[i][j][k]->id != 0)
+                //     continue;
+                // 跳过当前节点自身
+                if (dx == 0 && dy == 0 && dz == 0)
+                    continue;
+                // 检查邻居是否在地图范围内且为空闲
+                if (isFree(i, j, k))
+                { 
+                    double cost = sqrt(dx * dx + dy * dy + dz * dz);
+                    neighborPtrSets.push_back(GridNodeMap[i][j][k]);
+                    edgeCostSets.push_back(cost);
+                }
+                    
+            }
     /*
     *
     步骤 4: 完成 AstarPathFinder::AstarGetSucc 函数
@@ -180,6 +204,34 @@ inline void AstarPathFinder::AstarGetSucc(GridNodePtr currentPtr, vector<GridNod
 // 启发式函数（评估函数）
 double AstarPathFinder::getHeu(GridNodePtr node1, GridNodePtr node2)
 {
+    // double Manhattan = abs(node1->index(0) - node2->index(0)) + 
+    //             abs(node1->index(1) - node2->index(1)) + 
+    //             abs(node1->index(2) - node2->index(2));
+    // double Euclidean = sqrt( pow((node1->index(0) - node2->index(0)),2) + 
+    //             pow((node1->index(1) - node2->index(1)),2) + 
+    //             pow((node1->index(2) - node2->index(2)),2));
+    
+    // double Diagonal = max( max( abs(node1->index(0) - node2->index(0)), 
+    //                             abs(node1->index(1) - node2->index(1)) ),
+    //                             abs(node1->index(2) - node2->index(2)) );
+    
+    // double Dijkstra = 0.0;
+    
+    int dx = abs(node1->index(0) - node2->index(0));
+    int dy = abs(node1->index(1) - node2->index(1));
+    int dz = abs(node1->index(2) - node2->index(2));
+    
+    // 方法1：精确3D对角线距离
+    int dmin = min(dx, min(dy, dz));
+    int dmax = max(dx, max(dy, dz));
+    int dmid = dx + dy + dz - dmin - dmax;
+    
+    double D = 1.0;
+    double D2 = sqrt(2.0);   // ≈1.414
+    double D3 = sqrt(3.0);   // ≈1.732
+    double heu =D3 * dmin + D2 * (dmid - dmin) + D * (dmax - dmid);
+    double tie_breaker = 1.0 + 1.0 / 1000.0; // 微小的平局破坏器
+    return heu * tie_breaker;
     /* 
     选择可能的启发式函数：
     1. 曼哈顿距离 (Manhattan): |x1-x2| + |y1-y2| + |z1-z2|
@@ -249,6 +301,9 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt)
 
     // 主循环：当开集不为空时继续搜索
     while ( !openSet.empty() ){
+        currentPtr = openSet.begin()->second;  // 获取f值最小的节点
+        openSet.erase(openSet.begin());
+        currentPtr -> id = -1;
         /*
         *
         步骤 3: 从开集中删除f值最小的节点，将其放入闭集
@@ -296,6 +351,11 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt)
             *        
             */
             if(neighborPtr -> id == 0){  // 发现新节点，既不在闭集也不在开集中
+                neighborPtr -> gScore = currentPtr->gScore + edgeCostSets[i];
+                neighborPtr -> fScore = neighborPtr -> gScore + getHeu(neighborPtr, endPtr);
+                neighborPtr -> cameFrom = currentPtr;
+                neighborPtr -> id = 1; // 标记为开集中的节点
+                openSet.insert( make_pair(neighborPtr -> fScore, neighborPtr) );
                 /*
                 *
                 步骤 6: 对于新节点，执行必要的操作，将其加入开集并记录
@@ -312,6 +372,13 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt)
                 continue;
             }
             else if(neighborPtr -> id == 1){ // 该节点在开集中，需要判断是否需要更新
+                if(neighborPtr -> gScore > currentPtr->gScore + edgeCostSets[i]){ 
+                    neighborPtr -> gScore = currentPtr->gScore + edgeCostSets[i];
+                    neighborPtr -> fScore = neighborPtr -> gScore + getHeu(neighborPtr, endPtr);
+                    neighborPtr -> cameFrom = currentPtr;
+                    openSet.erase(neighborPtr->nodeMapIt);
+                    openSet.insert( make_pair(neighborPtr -> fScore, neighborPtr) );
+                }
                 /*
                 *
                 步骤 7: 对于开集中的节点，更新其值，维护开集
@@ -328,7 +395,9 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt)
                 */
                 continue;
             }
-            else{  // 该节点在闭集中（id == -1）
+            else{  
+                
+                // 该节点在闭集中（id == -1）
                 /*
                 *
                 请在下方编写代码
@@ -354,7 +423,13 @@ vector<Vector3d> AstarPathFinder::getPath()
 {   
     vector<Vector3d> path;
     vector<GridNodePtr> gridPath;
+    while (terminatePtr->cameFrom != NULL)
+    {
+        gridPath.push_back(terminatePtr->cameFrom);
+        terminatePtr = terminatePtr->cameFrom;
+    }
     
+    GridNodePtr currentPtr = terminatePtr;
     /*
     *
     步骤 8: 从当前节点回溯到起点，获取路径上的所有节点
